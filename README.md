@@ -93,11 +93,28 @@ For modern Lenovo IdeaPad, Legion, and Yoga laptops that govern conservation mod
 
 ---
 
-## 🧰 4. Behavior Details
+## 🧰 4. Behavior Details & AC Pass-Through
 
-- **Already above the threshold?** If your battery is currently at 98% and you set `avabatt 50 75`, charging immediately halts (`Not charging`). The laptop runs on pass-through AC power until natural drain brings it down to 50%, at which point charging resumes up to 75%.
-- **Persistence across reboots & sleep:** The included `avabatt.service` systemd unit re-applies your chosen thresholds on boot and resume from suspend/hibernate.
-- **Zero dependencies:** Written in pure, POSIX-friendly Bash. No Python runtime required, no pip packages, no background daemon.
+### 🔌 AC Pass-Through (Pure Wall Power)
+When a hardware threshold is reached or active:
+- **Zero battery wear:** The Embedded Controller (EC) physically opens the charging circuit. The battery draws **0 W** of power.
+- **Pure AC power:** Your laptop powers the motherboard, CPU, display, and peripherals entirely from the wall adapter (AC pass-through).
+- **No micro-cycling:** Unlike software-level limiters that wait for battery discharge and re-trigger charging cycles, native hardware thresholds keep the battery completely isolated and idle.
+
+### ❓ Why isn't my battery discharging down to the threshold?
+If your battery is currently at **98%–100%** and you set `avabatt 50 75`:
+1. **Charging halts immediately:** The status changes to `Not charging` and current flow drops to `0 W`.
+2. **The battery will NOT actively drain while plugged into AC:** Because the laptop is running on AC pass-through, the battery is resting and bypassed. It will not burn battery cycles to artificially drain itself while connected to wall power.
+3. **Reaching your target range:**
+   - Unplug your laptop charger and use the laptop on battery until it discharges below your stop threshold (e.g., down to 60–70%).
+   - Plug the charger back in.
+   - The laptop will continue running on AC pass-through. If capacity drops below your start threshold (e.g. 50%), charging will resume and cleanly stop at your ceiling (75%).
+
+### 🔄 Persistence Across Reboots & Sleep
+The included `avabatt.service` systemd unit re-applies your chosen thresholds on boot and resume from suspend/hibernate.
+
+### 🪶 Zero Dependencies
+Written in pure, POSIX-friendly Bash. No Python runtime required, no pip packages, and no resource-heavy background daemons like TLP.
 
 ---
 
