@@ -21,6 +21,8 @@ cd avabatt
 ./install.sh
 ```
 
+The installer links `/usr/local/bin/avabatt` and configures `avabatt.service` to persist thresholds across cold boots and suspend/hibernate events.
+
 ---
 
 ## ⌨️ 2. Quick Usage
@@ -29,7 +31,13 @@ cd avabatt
 # Query current status, charge level, and active limits
 avabatt status
 
-# Cap charge at 80% (recommended for desk / dock usage)
+# JSON output for telemetry or status monitoring
+avabatt status --json
+
+# Dedicated desk/dock profile: Start charging at 50%, stop at 75%
+sudo avabatt 50 75
+
+# Cap charge at 80% (recommended general desk usage)
 sudo avabatt 80
 # or:
 sudo avabatt on
@@ -39,8 +47,8 @@ sudo avabatt 100
 # or:
 sudo avabatt off
 
-# Custom threshold (50-100%)
-sudo avabatt 60
+# Custom stop threshold (start threshold auto-calculated 5% below stop)
+sudo avabatt 75
 ```
 
 ---
@@ -49,20 +57,31 @@ sudo avabatt 60
 
 Linux exposes battery charging thresholds through standardized and vendor-specific sysfs nodes. When configured, the embedded controller (EC) stops drawing power into the battery when the ceiling is reached, running the laptop purely off AC pass-through power.
 
-`avabatt` automatically detects and actuates the appropriate sysfs nodes in order of precedence:
+`avabatt` automatically detects and validates writable sysfs nodes across drivers:
 
 ### Standard Linux Kernel Power Supply Interface (Linux 5.4+)
 ```bash
 /sys/class/power_supply/BAT*/charge_control_end_threshold
 /sys/class/power_supply/BAT*/charge_control_start_threshold
 ```
-Writing `80` to `charge_control_end_threshold` commands the charge controller to halt charging at 80%. When supported, `avabatt` also sets `charge_control_start_threshold` to `75%` to prevent micro-cycling between 79% and 80%.
+Writing `75` to `charge_control_end_threshold` commands the charge controller to halt charging at 75%. Specifying a start threshold (e.g., `50`) prevents recharge cycles until the battery drains below that level.
 
 ### Legacy ThinkPad ACPI (`tp_smapi` / `thinkpad_acpi`)
 ```bash
 /sys/class/power_supply/BAT*/charge_stop_threshold
 /sys/class/power_supply/BAT*/charge_start_threshold
 ```
+
+### ASUS Laptops (`asus-wmi` / `asus-nb-wmi`)
+```bash
+/sys/devices/platform/asus-nb-wmi/charge_control_end_threshold
+```
+
+### Samsung Laptops (`samsung-laptop`)
+```bash
+/sys/devices/platform/samsung/battery_life_extender
+```
+*(0 = Normal 100%, 1 = Cap at 80%)*
 
 ### Lenovo IdeaPad ACPI (`VPC2004`)
 For modern Lenovo IdeaPad, Legion, and Yoga laptops that govern conservation mode via the platform driver:
@@ -76,8 +95,8 @@ For modern Lenovo IdeaPad, Legion, and Yoga laptops that govern conservation mod
 
 ## 🧰 4. Behavior Details
 
-- **Already above the threshold?** If your battery is currently at 95% and you set `avabatt 80`, charging immediately halts (`Not charging`). The laptop runs on battery or pass-through until natural drain brings it down to 80%, where it settles.
-- **Persistence across reboots:** Most modern laptop ECs persist charge thresholds in NVRAM across reboots.
+- **Already above the threshold?** If your battery is currently at 98% and you set `avabatt 50 75`, charging immediately halts (`Not charging`). The laptop runs on pass-through AC power until natural drain brings it down to 50%, at which point charging resumes up to 75%.
+- **Persistence across reboots & sleep:** The included `avabatt.service` systemd unit re-applies your chosen thresholds on boot and resume from suspend/hibernate.
 - **Zero dependencies:** Written in pure, POSIX-friendly Bash. No Python runtime required, no pip packages, no background daemon.
 
 ---

@@ -2,6 +2,7 @@
 set -euo pipefail
 
 BIN_TARGET="/usr/local/bin/avabatt"
+SYSTEMD_TARGET="/etc/systemd/system/avabatt.service"
 
 echo "============================================================"
 echo "                   avabatt Installer                        "
@@ -22,6 +23,13 @@ if [ -n "$SCRIPT_DIR" ]; then
     sudo ln -sf "$SCRIPT_DIR/avabatt" "$BIN_TARGET"
     sudo chmod +x "$BIN_TARGET"
     echo "✓ avabatt linked to $BIN_TARGET"
+
+    if [ -f "$SCRIPT_DIR/avabatt.service" ]; then
+        sudo cp "$SCRIPT_DIR/avabatt.service" "$SYSTEMD_TARGET"
+        sudo systemctl daemon-reload
+        sudo systemctl enable avabatt.service 2>/dev/null || true
+        echo "✓ avabatt.service installed and enabled for boot/resume persistence"
+    fi
 else
     TMP_DIR=$(mktemp -d /tmp/avabatt-install.XXXXXX)
     trap 'rm -rf "$TMP_DIR"' EXIT
@@ -31,6 +39,13 @@ else
     sudo cp "$TMP_DIR/avabatt/avabatt" "$BIN_TARGET"
     sudo chmod +x "$BIN_TARGET"
     echo "✓ avabatt installed to $BIN_TARGET"
+
+    if [ -f "$TMP_DIR/avabatt/avabatt.service" ]; then
+        sudo cp "$TMP_DIR/avabatt/avabatt.service" "$SYSTEMD_TARGET"
+        sudo systemctl daemon-reload
+        sudo systemctl enable avabatt.service 2>/dev/null || true
+        echo "✓ avabatt.service installed and enabled for boot/resume persistence"
+    fi
 fi
 
 echo ""

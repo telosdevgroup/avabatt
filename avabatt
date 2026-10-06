@@ -6,27 +6,60 @@
 # Uses 100% native Linux kernel sysfs interfaces (no TLP, no extra dependencies).
 #
 # Usage:
-#   avabatt status         # Show current battery charge threshold
-#   sudo avabatt 80        # Cap maximum charging at 80% (recommended for desk use)
-#   sudo avabatt 100       # Restore full 100% charging (for travel)
-#   sudo avabatt on        # Enable 80% conservation mode
-#   sudo avabatt off       # Disable conservation mode (allow 100%)
+#   avabatt status [--json] # Show current battery charge thresholds
+#   sudo avabatt 75         # Cap maximum charging at 75%
+#   sudo avabatt 50 75      # Start charging at 50%, stop at 75%
+#   sudo avabatt 80         # Cap maximum charging at 80% (recommended general desk use)
+#   sudo avabatt 100        # Restore full 100% charging (for travel)
+#   sudo avabatt on         # Enable 80% conservation mode
+#   sudo avabatt off        # Disable conservation mode (allow 100%)
 #
 
 set -euo pipefail
 
-# Find all battery threshold control nodes across various vendor drivers
-find_threshold_nodes() {
-    local nodes=()
-    for f in /sys/class/power_supply/BAT*/charge_control_end_threshold \
-             /sys/class/power_supply/BAT*/charge_stop_threshold \
-             /sys/bus/platform/devices/VPC2004:*/conservation_mode \
-             /sys/bus/platform/drivers/ideapad_laptop/VPC2004:*/conservation_mode; do
-        if [ -f "$f" ]; then
-            nodes+=("$f")
+CONFIG_FILE="/etc/avabatt.conf"
+
+get_status_json() {
+    local first=1
+    echo "{"
+    echo "  \"batteries\": ["
+    for bat in /sys/class/power_supply/BAT*; do
+        [ -d "$bat" ] || continue
+        local name
+        name="$(basename "$bat")"
+        local cap="null"
+        local status="null"
+        [ -f "$bat/capacity" ] && cap="$(cat "$bat/capacity")"
+        [ -f "$bat/status" ] && status="\"$(cat "$bat/status")\""
+
+        local start_th="null"
+        if [ -f "$bat/charge_control_start_threshold" ]; then
+            start_th="$(cat "$bat/charge_control_start_threshold")"
+        elif [ -f "$bat/charge_start_threshold" ]; then
+            start_th="$(cat "$bat/charge_start_threshold")"
         fi
+
+        local stop_th="null"
+        if [ -f "$bat/charge_control_end_threshold" ]; then
+            stop_th="$(cat "$bat/charge_control_end_threshold")"
+        elif [ -f "$bat/charge_stop_threshold" ]; then
+            stop_th="$(cat "$bat/charge_stop_threshold")"
+        fi
+
+        [ "$first" -eq 0 ] && echo "    }," || true
+        echo "    {"
+        echo "      \"name\": \"$name\","
+        echo "      \"capacity\": $cap,"
+        echo "      \"status\": $status,"
+        echo "      \"start_threshold\": $start_th,"
+        echo "      \"stop_threshold\": $stop_th"
+        first=0
     done
-    echo "${nodes[@]:-}"
+    if [ "$first" -eq 0 ]; then
+        echo "    }"
+    fi
+    echo "  ]"
+    echo "}"
 }
 
 get_status() {
@@ -48,18 +81,44 @@ get_status() {
         echo "Battery: $name"
         echo "  • Current Charge : $cap ($status)"
 
+        if [ -f "$bat/charge_control_start_threshold" ]; then
+            local start_th
+            start_th="$(cat "$bat/charge_control_start_threshold")"
+            echo "  • Start Charging : $start_th% (charge_control_start_threshold)"
+        elif [ -f "$bat/charge_start_threshold" ]; then
+            local start_th
+            start_th="$(cat "$bat/charge_start_threshold")"
+            echo "  • Start Charging : $start_th% (charge_start_threshold)"
+        fi
+
         if [ -f "$bat/charge_control_end_threshold" ]; then
             local end_th
             end_th="$(cat "$bat/charge_control_end_threshold")"
-            echo "  • Charge Limit   : $end_th% (charge_control_end_threshold)"
+            echo "  • Stop Charging  : $end_th% (charge_control_end_threshold)"
         elif [ -f "$bat/charge_stop_threshold" ]; then
             local stop_th
             stop_th="$(cat "$bat/charge_stop_threshold")"
-            echo "  • Charge Limit   : $stop_th% (charge_stop_threshold)"
+            echo "  • Stop Charging  : $stop_th% (charge_stop_threshold)"
         fi
     done
 
-    # Check vendor ACPI nodes (Lenovo/Asus/etc.)
+    # Check ASUS platform nodes
+    for node in /sys/devices/platform/asus-nb-wmi/charge_control_end_threshold; do
+        if [ -f "$node" ]; then
+            echo "ASUS WMI Charge Limit: $(cat "$node")%"
+        fi
+    done
+
+    # Check Samsung platform nodes
+    for node in /sys/devices/platform/samsung/battery_life_extender; do
+        if [ -f "$node" ]; then
+            local s_val
+            s_val="$(cat "$node")"
+            echo "Samsung Life Extender: $([ "$s_val" = "1" ] && echo "Active (Capped 80%)" || echo "Off (100%)")"
+        fi
+    done
+
+    # Check Lenovo ACPI nodes
     for node in /sys/bus/platform/devices/VPC2004:*/conservation_mode; do
         if [ -f "$node" ]; then
             local cm
@@ -75,62 +134,148 @@ get_status() {
 }
 
 set_threshold() {
-    local target="$1"
+    local start_val=""
+    local stop_val=""
 
-    if [ "$target" = "on" ] || [ "$target" = "enable" ]; then
-        target=80
-    elif [ "$target" = "off" ] || [ "$target" = "disable" ]; then
-        target=100
-    fi
-
-    if ! [[ "$target" =~ ^[0-9]+$ ]] || [ "$target" -lt 50 ] || [ "$target" -gt 100 ]; then
-        echo "Error: Target threshold must be a number between 50 and 100 (e.g. 80), or 'on'/'off'."
+    if [ "$#" -eq 1 ]; then
+        local target="$1"
+        if [ "$target" = "on" ] || [ "$target" = "enable" ]; then
+            stop_val=80
+        elif [ "$target" = "off" ] || [ "$target" = "disable" ]; then
+            stop_val=100
+        elif [[ "$target" =~ ^[0-9]+$ ]]; then
+            stop_val="$target"
+        else
+            echo "Error: Target threshold must be a number between 50 and 100 (e.g. 75 or 80), or 'on'/'off'." >&2
+            exit 1
+        fi
+    elif [ "$#" -eq 2 ]; then
+        start_val="$1"
+        stop_val="$2"
+        if ! [[ "$start_val" =~ ^[0-9]+$ ]] || ! [[ "$stop_val" =~ ^[0-9]+$ ]]; then
+            echo "Error: Both start and stop thresholds must be numbers (e.g. avabatt 50 75)." >&2
+            exit 1
+        fi
+        if [ "$start_val" -ge "$stop_val" ]; then
+            echo "Error: Start threshold ($start_val%) must be strictly lower than stop threshold ($stop_val%)." >&2
+            exit 1
+        fi
+        if [ "$start_val" -lt 0 ] || [ "$start_val" -gt 99 ]; then
+            echo "Error: Start threshold must be between 0 and 99." >&2
+            exit 1
+        fi
+    else
+        echo "Error: Invalid arguments. Usage: avabatt [STOP_LIMIT] or avabatt [START_LIMIT] [STOP_LIMIT]" >&2
         exit 1
     fi
 
+    if [ "$stop_val" -lt 50 ] || [ "$stop_val" -gt 100 ]; then
+        echo "Error: Stop threshold must be between 50 and 100 (e.g. 75, 80, 100)." >&2
+        exit 1
+    fi
+
+    if [ -z "$start_val" ]; then
+        if [ "$stop_val" -eq 100 ]; then
+            start_val=95
+        else
+            start_val=$((stop_val - 5))
+            [ "$start_val" -lt 40 ] && start_val=40
+        fi
+    fi
+
     if [ "$(id -u)" -ne 0 ]; then
-        echo "Error: Modifying battery charge thresholds requires root. Run with sudo."
+        echo "Error: Modifying battery charge thresholds requires root. Run with sudo." >&2
         exit 1
     fi
 
     local applied=0
 
-    # 1. Standard Linux kernel power supply threshold nodes
+    # 1. Standard Linux kernel power supply threshold nodes (Stop / End)
     for f in /sys/class/power_supply/BAT*/charge_control_end_threshold \
-             /sys/class/power_supply/BAT*/charge_stop_threshold; do
+             /sys/class/power_supply/BAT*/charge_stop_threshold \
+             /sys/devices/platform/asus-nb-wmi/charge_control_end_threshold; do
         if [ -f "$f" ]; then
-            echo "$target" > "$f" 2>/dev/null && applied=1 || true
+            if [ -w "$f" ]; then
+                if echo "$stop_val" > "$f" 2>/dev/null; then
+                    applied=1
+                fi
+            fi
         fi
     done
 
-    # 2. Start threshold (if supported, keep start threshold 5% below end threshold)
-    local start_target=$((target - 5))
-    [ "$start_target" -lt 40 ] && start_target=40
+    # 2. Start threshold (if supported)
+    local start_applied=0
     for f in /sys/class/power_supply/BAT*/charge_control_start_threshold \
              /sys/class/power_supply/BAT*/charge_start_threshold; do
         if [ -f "$f" ]; then
-            echo "$start_target" > "$f" 2>/dev/null || true
+            if [ -w "$f" ]; then
+                if echo "$start_val" > "$f" 2>/dev/null; then
+                    start_applied=1
+                fi
+            fi
         fi
     done
 
-    # 3. Vendor ACPI conservation mode (Lenovo 0/1)
-    for node in /sys/bus/platform/devices/VPC2004:*/conservation_mode; do
-        if [ -f "$node" ]; then
-            local cm_val=$([ "$target" -le 85 ] && echo "1" || echo "0")
-            echo "$cm_val" > "$node" 2>/dev/null && applied=1 || true
+    # 3. ASUS / Samsung / Lenovo platform nodes
+    # Samsung battery_life_extender (0 = 100%, 1 = 80%)
+    for node in /sys/devices/platform/samsung/battery_life_extender; do
+        if [ -f "$node" ] && [ -w "$node" ]; then
+            local s_val=$([ "$stop_val" -le 85 ] && echo "1" || echo "0")
+            if echo "$s_val" > "$node" 2>/dev/null; then
+                applied=1
+            fi
+        fi
+    done
+
+    # Lenovo VPC2004 conservation_mode (0 = 100%, 1 = 80%)
+    for node in /sys/bus/platform/devices/VPC2004:*/conservation_mode \
+                 /sys/bus/platform/drivers/ideapad_laptop/VPC2004:*/conservation_mode; do
+        if [ -f "$node" ] && [ -w "$node" ]; then
+            local cm_val=$([ "$stop_val" -le 85 ] && echo "1" || echo "0")
+            if echo "$cm_val" > "$node" 2>/dev/null; then
+                applied=1
+            fi
         fi
     done
 
     if [ "$applied" -eq 1 ]; then
-        echo "✓ Battery charge limit successfully set to ${target}%."
-        if [ "$target" -le 85 ]; then
-            echo "  (Battery health conservation active: stops charging at ${target}% to preserve lithium cells)."
+        # Save active configuration for persistence across reboots / resume
+        cat <<EOF > "$CONFIG_FILE"
+START_THRESHOLD=$start_val
+STOP_THRESHOLD=$stop_val
+EOF
+        chmod 644 "$CONFIG_FILE" 2>/dev/null || true
+
+        if [ "$start_applied" -eq 1 ]; then
+            echo "✓ Battery thresholds successfully set: Start at ${start_val}%, Stop at ${stop_val}%."
+        else
+            echo "✓ Battery charge limit successfully set to ${stop_val}%."
+        fi
+
+        if [ "$stop_val" -le 85 ]; then
+            echo "  (Battery health conservation active: preserves lithium cells during continuous AC power)."
         else
             echo "  (Full charge restored: battery will charge to 100%)."
         fi
     else
-        echo "Warning: No supported hardware battery charge threshold interfaces found on this machine."
+        echo "Error: No writable hardware battery charge threshold interfaces found on this machine." >&2
+        echo "Check that your laptop's platform/ACPI kernel driver is loaded." >&2
         exit 1
+    fi
+}
+
+apply_config() {
+    if [ -f "$CONFIG_FILE" ]; then
+        # shellcheck disable=SC1090
+        source "$CONFIG_FILE"
+        if [ -n "${START_THRESHOLD:-}" ] && [ -n "${STOP_THRESHOLD:-}" ]; then
+            set_threshold "$START_THRESHOLD" "$STOP_THRESHOLD"
+        elif [ -n "${STOP_THRESHOLD:-}" ]; then
+            set_threshold "$STOP_THRESHOLD"
+        fi
+    else
+        echo "No configuration file found at $CONFIG_FILE. Applying default 80%."
+        set_threshold 80
     fi
 }
 
@@ -139,20 +284,34 @@ main() {
 
     case "$cmd" in
         status)
-            get_status
+            if [ "${2:-}" = "--json" ] || [ "${2:-}" = "-j" ]; then
+                get_status_json
+            else
+                get_status
+            fi
+            ;;
+        --json|-j)
+            get_status_json
+            ;;
+        apply)
+            apply_config
             ;;
         -h|--help|help)
-            echo "Usage: avabatt [status | 80 | 100 | on | off]"
+            echo "Usage: avabatt [status [--json] | <stop> | <start> <stop> | on | off | apply]"
             echo ""
             echo "Commands:"
-            echo "  avabatt status   Show current battery charge threshold"
-            echo "  avabatt 80       Cap charging at 80% (recommended for desk/dock use)"
-            echo "  avabatt 100      Charge to 100% (for travel)"
-            echo "  avabatt on       Turn on 80% battery conservation"
-            echo "  avabatt off      Turn off conservation (charge to 100%)"
+            echo "  avabatt status           Show current battery charge thresholds"
+            echo "  avabatt status --json    Machine-readable JSON telemetry for status cards"
+            echo "  sudo avabatt 75          Cap charging at 75%"
+            echo "  sudo avabatt 50 75       Start charging at 50%, stop at 75% (desk/dock profile)"
+            echo "  sudo avabatt 80          Cap charging at 80% (recommended general limit)"
+            echo "  sudo avabatt 100         Charge to 100% (for travel)"
+            echo "  sudo avabatt on          Turn on 80% battery conservation"
+            echo "  sudo avabatt off         Turn off conservation (charge to 100%)"
+            echo "  sudo avabatt apply       Apply persisted thresholds from /etc/avabatt.conf"
             ;;
         *)
-            set_threshold "$cmd"
+            set_threshold "$@"
             ;;
     esac
 }

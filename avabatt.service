@@ -1,0 +1,12 @@
+[Unit]
+Description=Apply Native Battery Charge Thresholds
+Documentation=https://github.com/telosdevgroup/avabatt
+After=multi-user.target suspend.target hibernate.target hybrid-sleep.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/avabatt apply
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target suspend.target hibernate.target
